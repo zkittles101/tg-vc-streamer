@@ -1,7 +1,7 @@
 [project]
 name = "tg-vc-streamer"
 version = "0.1.0"
-description = "Add your description here"
+description = "a simple telegram bot to stream audio from youtube on group calls "
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
