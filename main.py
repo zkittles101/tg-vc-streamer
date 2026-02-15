@@ -1,9 +1,27 @@
 import asyncio
-from pyrogram import filters, idle, utils
+from os import getenv
+from pyrogram import filters, idle, utils, Client
 from pytgcalls import PyTgCalls
 
-from functions import app, get_audio_info, resolve_direct_url, CHAT_ID, LOGGER
+# Import from your existing local modules
+from functions import get_audio_info, resolve_direct_url, CHAT_ID, LOGGER
 import db
+
+# --- CONFIGURATION ---
+# These are fetched from your Render Environment Variables
+API_ID = getenv("API_ID")
+API_HASH = getenv("API_HASH")
+BOT_TOKEN = getenv("BOT_TOKEN")
+SESSION_STRING = getenv("SESSION_STRING")
+
+# Initialize the Pyrogram Client with the session string to bypass login prompts
+app = Client(
+    "tg_vc_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    session_string=SESSION_STRING
+)
 
 # --- PEER ID MONKEYPATCH ---
 
@@ -30,7 +48,7 @@ def format_time(seconds):
 
 
 async def play_worker():
-    """Simplified worker: Zero overhead, no live updates."""
+    """Worker handling the music queue with zero overhead."""
     while True:
         track = await db.db["queue"].get()
         db.db["current_track"] = track
@@ -39,14 +57,14 @@ async def play_worker():
         LOGGER.info("Worker: Processing '%s'", track['title'])
 
         try:
-            # Resolve the heavy link
+            # Resolve the heavy streaming URL
             direct_link = await resolve_direct_url(track["url"])
 
-            # Start Playback
+            # Start Playback in Voice Chat
             await call_py.play(CHAT_ID, direct_link)
             LOGGER.info("Worker: Playback started.")
 
-            # Send a single, static notification
+            # Send static notification
             status_text = (
                 "🎵 **Now Playing**\n\n"
                 f"📝 **Title:** `{track['title']}`\n"
@@ -55,11 +73,8 @@ async def play_worker():
             )
             await app.send_message(CHAT_ID, status_text)
 
-            # Instead of a loop, we just sleep for the duration of the track
-            # This is the most performance-efficient way to handle playback
+            # Wait for track duration while checking for skip signals
             sleep_time = track["duration"] + 2
-
-            # We use a small loop only to check if the user triggered /skip
             for _ in range(sleep_time):
                 if not db.db["is_playing"]:
                     break
@@ -71,18 +86,17 @@ async def play_worker():
             db.db["is_playing"] = False
             try:
                 await call_py.leave_call(CHAT_ID)
-                LOGGER.info("Worker: Playback ended/skipped. Left VC.")
+                LOGGER.info("Worker: Left VC.")
             except:
                 pass
 
             db.db["current_track"] = None
             db.db["queue"].task_done()
-            LOGGER.info("Worker: Ready for next queue item.")
+            LOGGER.info("Worker: Ready for next item.")
 
 
 @app.on_message(filters.command("play") & filters.chat(CHAT_ID))
 async def play_cmd(_, message):
-    LOGGER.info("Command: /play received")
     text_parts = message.text.split(None, 1)
     query = text_parts[1] if len(text_parts) > 1 else None
 
@@ -149,13 +163,12 @@ async def help_cmd(_, message):
 
 
 async def main():
-    LOGGER.info("Initializing...")
+    LOGGER.info("Starting Client and PyTgCalls...")
     await app.start()
     await call_py.start()
     asyncio.create_task(play_worker())
     LOGGER.info("--- VC Bot Online ---")
     await idle()
-
 
 if __name__ == "__main__":
     app.run(main())
