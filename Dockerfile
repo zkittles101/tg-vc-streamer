@@ -3,20 +3,21 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/root/.local/bin:$PATH"
+
 COPY pyproject.toml .
 
-# If you use requirements.txt instead, uncomment the next line:
-# COPY requirements.txt .
+# If you have a lockfile, copy it too:
+COPY uv.lock .
 
-# Install uv to manage dependencies efficiently
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:$PATH"
-
-RUN uv pip install --system .
+RUN uv sync
 
 COPY . .
 
