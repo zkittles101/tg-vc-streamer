@@ -3,7 +3,10 @@
 *.session-journal
 :memory:.session
 
+
 cookies.txt
+wgcf-account.toml
+wgcf-profile.conf
 
 .venv/
 __pycache__/

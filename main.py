@@ -1,44 +1,58 @@
 import asyncio
+import ntgcalls
+import socket
+import time
 from os import getenv
 from pyrogram import filters, idle, utils, Client
 from pytgcalls import PyTgCalls
+from flask import Flask
+from threading import Thread
 
-# Import from your existing local modules
+# Import from your local modules
 from functions import get_audio_info, resolve_direct_url, CHAT_ID, LOGGER
 import db
 
-# --- CONFIGURATION ---
-# These are fetched from your Render Environment Variables
+# --- 1. DUMMY HEALTH CHECK (For Koyeb/Render/Railway) ---
+health_app = Flask(__name__)
+@health_app.route('/')
+def health(): return "Bot is running"
+
+
+def run_health():
+    # Listens on port 8080 (standard for cloud services)
+    health_app.run(host="0.0.0.0", port=8080)
+
+
+# --- 2. CONFIGURATION ---
 API_ID = getenv("API_ID")
 API_HASH = getenv("API_HASH")
 BOT_TOKEN = getenv("BOT_TOKEN")
 SESSION_STRING = getenv("SESSION_STRING")
 
-# Initialize the Pyrogram Client with the session string to bypass login prompts
-app = Client(
-    "tg_vc_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    session_string=SESSION_STRING
-)
-
-# --- PEER ID MONKEYPATCH ---
+# --- 3. PROXY & NETWORK UTILS ---
 
 
-def get_peer_type_new(peer_id: int) -> str:
-    peer_id_str = str(peer_id)
-    if not peer_id_str.startswith("-"):
-        return "user"
-    elif peer_id_str.startswith("-100"):
-        return "channel"
-    return "chat"
+def wait_for_proxy(host, port, timeout=15):
+    """Wait for wireproxy to open its local port."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                LOGGER.info(f" Wireproxy detected on {host}:{port}")
+                return True
+        except:
+            LOGGER.warning(f" Waiting for Wireproxy on {host}:{port}...")
+            time.sleep(2)
+    return False
 
 
-utils.get_peer_type = get_peer_type_new
-# ---------------------------
+warp_proxy = {
+    "scheme": "socks5",
+    "hostname": "127.0.0.1",
+    "port": 40000
+}
 
-call_py = PyTgCalls(app)
+# --- 4. HELPERS & WORKERS ---
 
 
 def format_time(seconds):
@@ -80,6 +94,10 @@ async def play_worker():
                     break
                 await asyncio.sleep(1)
 
+        except ntgcalls.TelegramServerError:
+            LOGGER.error(
+                "Worker: Telegram VoIP Server rejected the connection (IP Block).")
+            await app.send_message(CHAT_ID, " **Voice Server Error:** Check proxy status/logs.")
         except Exception as err:
             LOGGER.error("Worker Error: %s", err, exc_info=True)
         finally:
@@ -94,24 +112,47 @@ async def play_worker():
             db.db["queue"].task_done()
             LOGGER.info("Worker: Ready for next item.")
 
+# --- 5. INITIALIZE CLIENTS ---
+app = Client(
+    "tg_vc_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    session_string=SESSION_STRING,
+    proxy=warp_proxy,
+    in_memory=True
+)
+
+# Peer ID Monkeypatch
+
+
+def get_peer_type_new(peer_id: int) -> str:
+    peer_id_str = str(peer_id)
+    if not peer_id_str.startswith("-"):
+        return "user"
+    elif peer_id_str.startswith("-100"):
+        return "channel"
+    return "chat"
+
+
+utils.get_peer_type = get_peer_type_new
+call_py = PyTgCalls(app)
+
+# --- 6. COMMAND HANDLERS ---
+
 
 @app.on_message(filters.command("play") & filters.chat(CHAT_ID))
 async def play_cmd(_, message):
     text_parts = message.text.split(None, 1)
     query = text_parts[1] if len(text_parts) > 1 else None
-
     if not query:
         return await message.reply_text("❌ Usage: `/play [song name]`")
-
     search_msg = await message.reply_text("🔍 Searching...")
     info = await get_audio_info(query)
-
     if not info:
         return await search_msg.edit("❌ No results found.")
-
     info["requester"] = message.from_user.mention
     await db.db["queue"].put(info)
-
     if db.db["is_playing"]:
         await search_msg.edit(f"📝 **Queued:** `{info['title']}`")
     else:
@@ -143,7 +184,6 @@ async def queue_cmd(_, message):
     curr = db.db.get("current_track")
     if not curr and db.db["queue"].empty():
         return await message.reply_text("📋 Queue is empty.")
-
     t_title = curr["title"] if curr else "None"
     q_size = db.db["queue"].qsize()
     await message.reply_text(f"▶️ **Now:** `{t_title}`\n📋 **Queue:** `{q_size}`")
@@ -161,12 +201,25 @@ async def help_cmd(_, message):
     )
     await message.reply_text(help_text)
 
+# --- 7. MAIN RUNNER ---
+
 
 async def main():
+    # Start Health Check Server in background
+    Thread(target=run_health, daemon=True).start()
+
+    # Wait for Proxy bridge
+    if not wait_for_proxy("127.0.0.1", 40000):
+        LOGGER.error(
+            "❌ Wireproxy failed to start. Continuing without proxy check...")
+
     LOGGER.info("Starting Client and PyTgCalls...")
     await app.start()
     await call_py.start()
+
+    # Start the music worker (now correctly defined above)
     asyncio.create_task(play_worker())
+
     LOGGER.info("--- VC Bot Online ---")
     await idle()
 
